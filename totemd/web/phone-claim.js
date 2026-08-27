@@ -74,17 +74,38 @@
    * are first.
    */
   function signerUri(template, callbackUrl) {
-    var link = 'nostrsigner:' + encodeURIComponent(JSON.stringify(template)) +
-      '?compressionType=none' +
+    var event = encodeURIComponent(JSON.stringify(template));
+    // Every parameter is sent twice, in the two places Amber looks - and it
+    // looks in exactly one of them, chosen by something this page does not
+    // control. IntentUtils routes on whether the launching browser set
+    // Browser.EXTRA_APPLICATION_ID: with it, the parameters are read out of the
+    // URL; without it, out of the intent extras, and a plain "nostrsigner:"
+    // link carries no extras at all. Measured on hardware: Amber answered
+    // "Amber received a malformed nostrsigner request", which is what
+    // parseSignerType(null) produces. Sending both costs a longer link and
+    // removes the browser from the question.
+    var query = '?compressionType=none' +
       '&returnType=event' +
       '&type=sign_event' +
-      '&appName=Totem';
-    // With no callback the signer copies its answer to the clipboard instead of
-    // reopening anything. That is the second way home, and it shares nothing
-    // with the first: it does not depend on the phone coming back to a browser
-    // at all. Worth having, because the return leg is the one part of this that
-    // cannot be checked without a real phone.
-    return callbackUrl ? link + '&callbackUrl=' + encodeURIComponent(callbackUrl) : link;
+      '&appName=Totem' +
+      (callbackUrl ? '&callbackUrl=' + encodeURIComponent(callbackUrl) : '');
+    // An "intent:" link with no "//" keeps the payload opaque, so Amber sees
+    // exactly the "nostrsigner:<event>?..." it would have seen directly.
+    var extras = ';S.type=sign_event' +
+      ';S.returnType=event' +
+      ';S.compression=none' +
+      ';S.appName=Totem' +
+      (callbackUrl ? ';S.callbackUrl=' + encodeURIComponent(callbackUrl) : '');
+    return 'intent:' + event + query +
+      '#Intent;scheme=nostrsigner;package=com.greenart7c3.nostrsigner' +
+      extras + ';end';
+  }
+
+  /** The plain link, for a signer that is not Amber and not behind an intent. */
+  function plainSignerUri(template, callbackUrl) {
+    return 'nostrsigner:' + encodeURIComponent(JSON.stringify(template)) +
+      '?compressionType=none&returnType=event&type=sign_event&appName=Totem' +
+      (callbackUrl ? '&callbackUrl=' + encodeURIComponent(callbackUrl) : '');
   }
 
   /** Where the signer is told to come back to: this page, nothing else. */
@@ -339,6 +360,7 @@
     RETURN_PATH: RETURN_PATH,
     authTemplate: authTemplate,
     signerUri: signerUri,
+    plainSignerUri: plainSignerUri,
     callbackUrl: callbackUrl,
     returnedBlob: returnedBlob,
     parseEvent: parseEvent,

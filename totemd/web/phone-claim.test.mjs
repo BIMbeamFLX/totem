@@ -39,18 +39,53 @@ const SIGNED = {
   sig: 'ab'.repeat(64),
 };
 
-/** Amber's own read of the link, transcribed from IntentUtils.decodeData. */
-function amberParses(uri) {
-  const decoded = decodeURIComponent(uri.replace('nostrsigner:', '').replace(/\+/g, '%2b'));
+/**
+ * Android's Intent.parseUri, for the "intent:" form.
+ *
+ * Everything between "intent:" and "#Intent;" becomes the scheme-specific part
+ * and the scheme= directive replaces the scheme, so an intent link with no "//"
+ * yields exactly the opaque "nostrsigner:<payload>" a direct link would.
+ * "S.key=value" pairs become String extras, percent-decoded.
+ */
+function androidParses(uri) {
+  const at = uri.indexOf('#Intent;');
+  if (at < 0) return { data: uri, extras: {} };
+  const payload = uri.slice('intent:'.length, at);
+  const extras = {};
+  let scheme = '';
+  for (const part of uri.slice(at + '#Intent;'.length).split(';')) {
+    if (part === 'end' || part === '') continue;
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const key = part.slice(0, eq);
+    const value = decodeURIComponent(part.slice(eq + 1));
+    if (key === 'scheme') scheme = value;
+    else if (key.startsWith('S.')) extras[key.slice(2)] = value;
+  }
+  return { data: `${scheme}:${payload}`, extras };
+}
+
+/** Amber's read of the URL (IntentUtils.getIntentDataWithoutExtras). */
+function amberParses(data) {
+  const decoded = decodeURIComponent(data.replace('nostrsigner:', '').replace(/\+/g, '%2b'));
   const parts = decoded.split('?');
   const parameters = {};
-  parts.slice(1).forEach((part) => {
-    part.split('&').forEach((pair) => {
-      const at = pair.indexOf('=');
-      if (at > 0) parameters[pair.slice(0, at)] = pair.slice(at + 1);
-    });
-  });
+  parts.slice(1).forEach((part) => part.split('&').forEach((pair) => {
+    const eq = pair.indexOf('=');
+    if (eq > 0) parameters[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }));
   return { event: parts[0], parameters };
+}
+
+/** Amber's read of the extras (IntentUtils.getIntentDataFromIntent). */
+function amberReadsExtras(data, extras) {
+  return {
+    event: decodeURIComponent(data.replace('nostrsigner:', '')).split('?')[0],
+    type: extras.type,
+    returnType: extras.returnType,
+    callbackUrl: extras.callbackUrl,
+    appName: extras.appName,
+  };
 }
 
 test('the authorization carries exactly the four tags totemd accepts', () => {
@@ -80,7 +115,7 @@ test('the challenge is echoed, never rebuilt', () => {
 test("Amber's parse recovers the event and the parameters exactly", () => {
   const template = claim.authTemplate(CHALLENGE, 1756300000);
   const uri = claim.signerUri(template, claim.callbackUrl('http://10.21.0.1:8080'));
-  const seen = amberParses(uri);
+  const seen = amberParses(androidParses(uri).data);
   assert.deepEqual(JSON.parse(seen.event), template);
   assert.equal(seen.parameters.type, 'sign_event');
   // The whole point of one round trip: the finished event carries the pubkey.
@@ -96,7 +131,7 @@ test('the callback survives being decoded and split on "?"', () => {
   // no longer points at this page. Nothing about percent-encoding prevents it,
   // because the decode happens first.
   const uri = claim.signerUri(claim.authTemplate(CHALLENGE, 1), claim.callbackUrl('http://t'));
-  const recovered = amberParses(uri).parameters.callbackUrl;
+  const recovered = amberParses(androidParses(uri).data).parameters.callbackUrl;
   assert.ok(!recovered.includes('?'), 'a callback with a "?" loses everything after it');
   assert.equal(recovered, 'http://t/claim/phone/');
   // And what Amber then builds must land back on this page.
@@ -110,14 +145,14 @@ test('the encoded event survives a brace, a quote and a slash', () => {
   // would split the event on a "?" that never belonged to the parameters.
   assert.ok(!uri.includes('{'), 'the event must not reach the link unencoded');
   assert.ok(!uri.includes('"'), 'the event must not reach the link unencoded');
-  assert.equal(JSON.parse(amberParses(uri).event).tags.length, 4);
+  assert.equal(JSON.parse(amberParses(androidParses(uri).data).event).tags.length, 4);
 });
 
 test('with no callback the signer is asked to use the clipboard', () => {
   // The second way home. NIP-55: "If [callbackUrl] is omitted, the result is
   // copied to the clipboard" - so the absence of the parameter *is* the
   // instruction, and adding it back empty would silently disable the fallback.
-  const uri = claim.signerUri(claim.authTemplate(CHALLENGE, 1), null);
+  const uri = claim.plainSignerUri(claim.authTemplate(CHALLENGE, 1), null);
   const seen = amberParses(uri);
   assert.equal(seen.parameters.callbackUrl, undefined);
   assert.ok(!uri.includes('callbackUrl'), 'no callback at all, not an empty one');
@@ -333,4 +368,42 @@ test('one claim at a time, however many times the button is tapped', async () =>
   } finally {
     page.restore();
   }
+});
+
+test('Amber finds the request whichever way it looks', () => {
+  // This is the bug that reached hardware. IntentUtils routes on whether the
+  // launching browser set Browser.EXTRA_APPLICATION_ID: with it, the parameters
+  // are read from the URL; without it, from the intent extras. A plain
+  // "nostrsigner:" link carries no extras, so on that branch parseSignerType
+  // got null and Amber answered "Amber received a malformed nostrsigner
+  // request". Which branch runs is not ours to choose, so both must work.
+  const template = claim.authTemplate(CHALLENGE, 1756300000);
+  const back = claim.callbackUrl('http://10.21.0.1:8080');
+  const { data, extras } = androidParses(claim.signerUri(template, back));
+
+  // The URL branch.
+  const url = amberParses(data);
+  assert.equal(url.parameters.type, 'sign_event');
+  assert.equal(url.parameters.returnType, 'event');
+  assert.equal(url.parameters.callbackUrl, back);
+  assert.deepEqual(JSON.parse(url.event), template);
+
+  // The extras branch, which reads the event from the URI and the rest here.
+  const bare = amberReadsExtras(data, extras);
+  assert.equal(bare.type, 'sign_event');
+  assert.equal(bare.returnType, 'event');
+  assert.equal(bare.callbackUrl, back);
+  assert.deepEqual(JSON.parse(bare.event), template);
+
+  // And the data really is the opaque form Amber strips a scheme off.
+  assert.ok(data.startsWith('nostrsigner:'), data.slice(0, 24));
+  assert.ok(!data.startsWith('nostrsigner://'), 'a "//" would make it hierarchical');
+});
+
+test('the clipboard variant keeps both halves callback-free', () => {
+  const { data, extras } = androidParses(claim.signerUri(claim.authTemplate(CHALLENGE, 1), null));
+  assert.equal(amberParses(data).parameters.callbackUrl, undefined);
+  assert.equal(extras.callbackUrl, undefined);
+  // NIP-55: the absence of the parameter is the instruction to use the clipboard.
+  assert.equal(extras.type, 'sign_event');
 });
