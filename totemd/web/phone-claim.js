@@ -45,6 +45,19 @@
    * fifth tag outright, so nothing may be added here for flavour. Every value
    * is echoed from the challenge rather than rebuilt, because the server
    * compares them against what it issued, not against what they should be.
+   *
+   * Two of those four are not NIP-98, and that is deliberate rather than
+   * sloppy. The spec names `u` and `method`, allows `payload`, and says
+   * created_at MUST fall inside a window of about a minute. This device has no
+   * real-time clock, so that window is unenforceable here and a strict reading
+   * would refuse every claim it ever received. The `nonce` carries the
+   * freshness instead: the server issues it, binds it to one URL, method and
+   * body hash, and spends it on first use.
+   *
+   * The cost is worth stating plainly: a generic NIP-98 client sends no nonce
+   * and this endpoint refuses it. created_at is still set from the phone's
+   * clock, which is the one clock in the exchange worth believing, so nothing
+   * has to change here if the server ever starts checking it.
    */
   function authTemplate(challenge, nowSeconds) {
     return {
